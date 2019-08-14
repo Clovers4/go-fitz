@@ -4,6 +4,7 @@ package fitz
 
 /*
 #include <mupdf/fitz.h>
+#include <mupdf/pdf.h>
 #include <stdlib.h>
 
 const char *fz_version = FZ_VERSION;
@@ -11,8 +12,10 @@ const char *fz_version = FZ_VERSION;
 import "C"
 
 import (
+	"bytes"
 	"errors"
 	"image"
+	_ "image/png"
 	"io"
 	"io/ioutil"
 	"os"
@@ -28,6 +31,8 @@ var (
 	ErrOpenDocument  = errors.New("fitz: cannot open document")
 	ErrOpenMemory    = errors.New("fitz: cannot open memory")
 	ErrPageMissing   = errors.New("fitz: page missing")
+	ErrObjMissing    = errors.New("fitz: obj missing")
+	ErrNotImage      = errors.New("fitz: obj is not image, please ignore this obj")
 	ErrCreatePixmap  = errors.New("fitz: cannot create pixmap")
 	ErrPixmapSamples = errors.New("fitz: cannot get pixmap samples")
 	ErrNeedsPassword = errors.New("fitz: document needs password")
@@ -37,8 +42,8 @@ var (
 // Document represents fitz document.
 type Document struct {
 	ctx *C.struct_fz_context_s
-	doc *C.struct_fz_document_s
-	mtx sync.Mutex
+	pdf *C.struct_pdf_document_s
+	mtx sync.Mutex //todo:delete lock to be more fast
 }
 
 // Outline type.
@@ -55,10 +60,9 @@ type Outline struct {
 	Top float64
 }
 
-// New returns new fitz document.
+// New returns new fitz document from filename. After process, please do Close() to release resource.
 func New(filename string) (f *Document, err error) {
 	f = &Document{}
-
 	filename, err = filepath.Abs(filename)
 	if err != nil {
 		return
@@ -80,12 +84,11 @@ func New(filename string) (f *Document, err error) {
 	cfilename := C.CString(filename)
 	defer C.free(unsafe.Pointer(cfilename))
 
-	f.doc = C.fz_open_document(f.ctx, cfilename)
-	if f.doc == nil {
+	f.pdf = C.pdf_open_document(f.ctx, cfilename)
+	if f.pdf == nil {
 		err = ErrOpenDocument
 	}
-
-	ret := C.fz_needs_password(f.ctx, f.doc)
+	ret := C.pdf_needs_password(f.ctx, f.pdf)
 	v := bool(int(ret) != 0)
 	if v {
 		err = ErrNeedsPassword
@@ -94,7 +97,7 @@ func New(filename string) (f *Document, err error) {
 	return
 }
 
-// NewFromMemory returns new fitz document from byte slice.
+// NewFromMemory returns new fitz document from byte slice, please do Close() to release resource.
 func NewFromMemory(b []byte) (f *Document, err error) {
 	f = &Document{}
 
@@ -113,16 +116,14 @@ func NewFromMemory(b []byte) (f *Document, err error) {
 		err = ErrOpenMemory
 		return
 	}
+	defer C.fz_drop_stream(f.ctx, stream)
 
-	cmagic := C.CString(contentType(b))
-	defer C.free(unsafe.Pointer(cmagic))
-
-	f.doc = C.fz_open_document_with_stream(f.ctx, cmagic, stream)
-	if f.doc == nil {
+	f.pdf = C.pdf_open_document_with_stream(f.ctx, stream)
+	if f.pdf == nil {
 		err = ErrOpenDocument
 	}
 
-	ret := C.fz_needs_password(f.ctx, f.doc)
+	ret := C.pdf_needs_password(f.ctx, f.pdf)
 	v := bool(int(ret) != 0)
 	if v {
 		err = ErrNeedsPassword
@@ -131,7 +132,7 @@ func NewFromMemory(b []byte) (f *Document, err error) {
 	return
 }
 
-// NewFromReader returns new fitz document from io.Reader.
+// NewFromReader returns new fitz document from io.Reader, please do Close() to release resource.
 func NewFromReader(r io.Reader) (f *Document, err error) {
 	b, e := ioutil.ReadAll(r)
 	if e != nil {
@@ -139,139 +140,36 @@ func NewFromReader(r io.Reader) (f *Document, err error) {
 		return
 	}
 
-	f, err = NewFromMemory(b)
-
-	return
+	return NewFromMemory(b)
 }
 
 // NumPage returns total number of pages in document.
 func (f *Document) NumPage() int {
-	return int(C.fz_count_pages(f.ctx, f.doc))
+	return int(C.pdf_count_pages(f.ctx, f.pdf))
 }
 
-// Image returns image for given page number.
-func (f *Document) Image(pageNumber int) (image.Image, error) {
-	return f.ImageDPI(pageNumber, 300.0)
+// NumObj returns total number of objects in document.
+func (f *Document) NumObj() int {
+	return int(C.pdf_count_objects(f.ctx, f.pdf))
 }
 
-// ImageDPI returns image for given page number and DPI.
-func (f *Document) ImageDPI(pageNumber int, dpi float64) (image.Image, error) {
-	f.mtx.Lock()
-	defer f.mtx.Unlock()
-
-	img := image.RGBA{}
-
-	if pageNumber >= f.NumPage() {
-		return nil, ErrPageMissing
-	}
-
-	page := C.fz_load_page(f.ctx, f.doc, C.int(pageNumber))
-	defer C.fz_drop_page(f.ctx, page)
-
-	var bounds C.fz_rect
-	C.fz_bound_page(f.ctx, page, &bounds)
-
-	var ctm C.fz_matrix
-	C.fz_scale(&ctm, C.float(dpi/72), C.float(dpi/72))
-
-	var bbox C.fz_irect
-	C.fz_transform_rect(&bounds, &ctm)
-	C.fz_round_rect(&bbox, &bounds)
-
-	pixmap := C.fz_new_pixmap_with_bbox(f.ctx, C.fz_device_rgb(f.ctx), &bbox, nil, 1)
-	if pixmap == nil {
-		return nil, ErrCreatePixmap
-	}
-
-	C.fz_clear_pixmap_with_value(f.ctx, pixmap, C.int(0xff))
-	defer C.fz_drop_pixmap(f.ctx, pixmap)
-
-	device := C.fz_new_draw_device(f.ctx, &ctm, pixmap)
-	C.fz_enable_device_hints(f.ctx, device, C.FZ_NO_CACHE)
-	defer C.fz_drop_device(f.ctx, device)
-
-	drawMatrix := C.fz_identity
-	C.fz_run_page(f.ctx, page, device, &drawMatrix, nil)
-
-	C.fz_close_device(f.ctx, device)
-
-	pixels := C.fz_pixmap_samples(f.ctx, pixmap)
-	if pixels == nil {
-		return nil, ErrPixmapSamples
-	}
-
-	img.Pix = C.GoBytes(unsafe.Pointer(pixels), C.int(4*bbox.x1*bbox.y1))
-	img.Rect = image.Rect(int(bbox.x0), int(bbox.y0), int(bbox.x1), int(bbox.y1))
-	img.Stride = 4 * img.Rect.Max.X
-
-	return &img, nil
-}
-
-// ImagePNG returns image for given page number as PNG bytes.
-func (f *Document) ImagePNG(pageNumber int, dpi float64) ([]byte, error) {
-	f.mtx.Lock()
-	defer f.mtx.Unlock()
-
-	if pageNumber >= f.NumPage() {
-		return nil, ErrPageMissing
-	}
-
-	page := C.fz_load_page(f.ctx, f.doc, C.int(pageNumber))
-	defer C.fz_drop_page(f.ctx, page)
-
-	var bounds C.fz_rect
-	C.fz_bound_page(f.ctx, page, &bounds)
-
-	var ctm C.fz_matrix
-	C.fz_scale(&ctm, C.float(dpi/72), C.float(dpi/72))
-
-	var bbox C.fz_irect
-	C.fz_transform_rect(&bounds, &ctm)
-	C.fz_round_rect(&bbox, &bounds)
-
-	pixmap := C.fz_new_pixmap_with_bbox(f.ctx, C.fz_device_rgb(f.ctx), &bbox, nil, 1)
-	if pixmap == nil {
-		return nil, ErrCreatePixmap
-	}
-
-	C.fz_clear_pixmap_with_value(f.ctx, pixmap, C.int(0xff))
-	defer C.fz_drop_pixmap(f.ctx, pixmap)
-
-	device := C.fz_new_draw_device(f.ctx, &ctm, pixmap)
-	C.fz_enable_device_hints(f.ctx, device, C.FZ_NO_CACHE)
-	defer C.fz_drop_device(f.ctx, device)
-
-	drawMatrix := C.fz_identity
-	C.fz_run_page(f.ctx, page, device, &drawMatrix, nil)
-
-	C.fz_close_device(f.ctx, device)
-
-	buf := C.fz_new_buffer_from_pixmap_as_png(f.ctx, pixmap, nil)
-	defer C.fz_drop_buffer(f.ctx, buf)
-
-	size := C.fz_buffer_storage(f.ctx, buf, nil)
-	str := C.GoStringN(C.fz_string_from_buffer(f.ctx, buf), C.int(size))
-
-	return []byte(str), nil
-}
-
-// Text returns text for given page number.
+// Text returns text for given page number.  Index start at 0
 func (f *Document) Text(pageNumber int) (string, error) {
 	f.mtx.Lock()
 	defer f.mtx.Unlock()
 
-	if pageNumber >= f.NumPage() {
+	if pageNumber < 0 || f.NumPage() <= pageNumber {
 		return "", ErrPageMissing
 	}
 
-	page := C.fz_load_page(f.ctx, f.doc, C.int(pageNumber))
-	defer C.fz_drop_page(f.ctx, page)
+	page := C.pdf_load_page(f.ctx, f.pdf, C.int(pageNumber))
+	defer C.fz_drop_page(f.ctx, (*C.fz_page)(unsafe.Pointer(page)))
 
 	var bounds C.fz_rect
-	C.fz_bound_page(f.ctx, page, &bounds)
+	C.pdf_bound_page(f.ctx, page, &bounds)
 
 	var ctm C.fz_matrix
-	C.fz_scale(&ctm, C.float(72.0/72), C.float(72.0/72))
+	C.fz_scale(&ctm, C.float(1.0), C.float(1.0))
 
 	text := C.fz_new_stext_page(f.ctx, &bounds)
 	defer C.fz_drop_stext_page(f.ctx, text)
@@ -284,7 +182,7 @@ func (f *Document) Text(pageNumber int) (string, error) {
 	defer C.fz_drop_device(f.ctx, device)
 
 	var cookie C.fz_cookie
-	C.fz_run_page(f.ctx, page, device, &ctm, &cookie)
+	C.pdf_run_page(f.ctx, page, device, &ctm, &cookie)
 
 	C.fz_close_device(f.ctx, device)
 
@@ -296,102 +194,48 @@ func (f *Document) Text(pageNumber int) (string, error) {
 	return str, nil
 }
 
-// HTML returns html for given page number.
-func (f *Document) HTML(pageNumber int, header bool) (string, error) {
+// Image returns image.Image encoded by png. The objNumber should between 1 ~ f.NumObj()
+func (f *Document) Image(objNumber int) (image.Image, error) {
 	f.mtx.Lock()
 	defer f.mtx.Unlock()
 
-	if pageNumber >= f.NumPage() {
-		return "", ErrPageMissing
+	if objNumber <= 0 || f.NumObj() <= objNumber {
+		return nil, ErrObjMissing
 	}
 
-	page := C.fz_load_page(f.ctx, f.doc, C.int(pageNumber))
-	defer C.fz_drop_page(f.ctx, page)
-
-	var bounds C.fz_rect
-	C.fz_bound_page(f.ctx, page, &bounds)
-
-	var ctm C.fz_matrix
-	C.fz_scale(&ctm, C.float(72.0/72), C.float(72.0/72))
-
-	text := C.fz_new_stext_page(f.ctx, &bounds)
-	defer C.fz_drop_stext_page(f.ctx, text)
-
-	var opts C.fz_stext_options
-	opts.flags = C.FZ_STEXT_PRESERVE_IMAGES
-
-	device := C.fz_new_stext_device(f.ctx, text, &opts)
-	C.fz_enable_device_hints(f.ctx, device, C.FZ_NO_CACHE)
-	defer C.fz_drop_device(f.ctx, device)
-
-	var cookie C.fz_cookie
-	C.fz_run_page(f.ctx, page, device, &ctm, &cookie)
-
-	C.fz_close_device(f.ctx, device)
-
-	buf := C.fz_new_buffer(f.ctx, 1024)
-	defer C.fz_drop_buffer(f.ctx, buf)
-
-	out := C.fz_new_output_with_buffer(f.ctx, buf)
-	defer C.fz_drop_output(f.ctx, out)
-
-	if header {
-		C.fz_print_stext_header_as_html(f.ctx, out)
+	obj := C.pdf_load_object(f.ctx, f.pdf, C.int(objNumber));
+	if f.isImage(obj) {
+		return f.saveImage(objNumber)
 	}
-	C.fz_print_stext_page_as_html(f.ctx, out, text)
-	if header {
-		C.fz_print_stext_trailer_as_html(f.ctx, out)
-	}
-
-	str := C.GoString(C.fz_string_from_buffer(f.ctx, buf))
-
-	return str, nil
+	return nil, ErrNotImage
 }
 
-// SVG returns svg document for given page number.
-func (f *Document) SVG(pageNumber int) (string, error) {
-	f.mtx.Lock()
-	defer f.mtx.Unlock()
+func (f *Document) isImage(obj *C.pdf_obj) bool {
+	objType := C.pdf_dict_get(f.ctx, obj, C.PDF_NAME_Subtype);
+	return C.int(1) == C.pdf_name_eq(f.ctx, objType, C.PDF_NAME_Image)
+}
 
-	if pageNumber >= f.NumPage() {
-		return "", ErrPageMissing
-	}
+func (f *Document) saveImage(objNumber int) (image.Image, error) {
+	ref := C.pdf_new_indirect(f.ctx, f.pdf, C.int(objNumber), C.int(0))
+	defer C.pdf_drop_obj(f.ctx, ref)
 
-	page := C.fz_load_page(f.ctx, f.doc, C.int(pageNumber))
-	defer C.fz_drop_page(f.ctx, page)
+	fzImg := C.pdf_load_image(f.ctx, f.pdf, ref)
+	defer C.fz_drop_image(f.ctx, fzImg)
 
-	var bounds C.fz_rect
-	C.fz_bound_page(f.ctx, page, &bounds)
-
-	var ctm C.fz_matrix
-	C.fz_scale(&ctm, C.float(72.0/72), C.float(72.0/72))
-	C.fz_transform_rect(&bounds, &ctm)
-
-	buf := C.fz_new_buffer(f.ctx, 1024)
+	buf := C.fz_new_buffer_from_image_as_png(f.ctx, fzImg, nil)
 	defer C.fz_drop_buffer(f.ctx, buf)
 
-	out := C.fz_new_output_with_buffer(f.ctx, buf)
-	defer C.fz_drop_output(f.ctx, out)
-
-	device := C.fz_new_svg_device(f.ctx, out, bounds.x1-bounds.x0, bounds.y1-bounds.y0, C.FZ_SVG_TEXT_AS_PATH, 1)
-	C.fz_enable_device_hints(f.ctx, device, C.FZ_NO_CACHE)
-	defer C.fz_drop_device(f.ctx, device)
-
-	var cookie C.fz_cookie
-	C.fz_run_page(f.ctx, page, device, &ctm, &cookie)
-
-	C.fz_close_device(f.ctx, device)
-
-	str := C.GoString(C.fz_string_from_buffer(f.ctx, buf))
-
-	return str, nil
+	size := C.fz_buffer_storage(f.ctx, buf, nil)
+	str := C.GoStringN(C.fz_string_from_buffer(f.ctx, buf), C.int(size))
+	img, _, err := image.Decode(bytes.NewBuffer([]byte(str)))
+	return img, err
 }
 
 // ToC returns the table of contents (also known as outline).
 func (f *Document) ToC() ([]Outline, error) {
 	data := make([]Outline, 0)
 
-	outline := C.fz_load_outline(f.ctx, f.doc)
+	outline := C.pdf_load_outline(f.ctx, f.pdf)
 	if outline == nil {
 		return nil, ErrLoadOutline
 	}
@@ -429,8 +273,9 @@ func (f *Document) Metadata() map[string]string {
 		defer C.free(unsafe.Pointer(ckey))
 
 		buf := make([]byte, 256)
-		C.fz_lookup_metadata(f.ctx, f.doc, ckey, (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)))
+		C.pdf_lookup_metadata(f.ctx, f.pdf, ckey, (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)))
 
+		buf = bytes.TrimRight(buf, "\x00")
 		return string(buf)
 	}
 
@@ -450,7 +295,8 @@ func (f *Document) Metadata() map[string]string {
 
 // Close closes the underlying fitz document.
 func (f *Document) Close() error {
-	C.fz_drop_document(f.ctx, f.doc)
+	C.pdf_drop_document(f.ctx, f.pdf)
+	C.fz_flush_warnings(f.ctx)
 	C.fz_drop_context(f.ctx)
 	return nil
 }

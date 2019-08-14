@@ -2,48 +2,26 @@ package fitz
 
 import (
 	"fmt"
-	"image/jpeg"
+	"image/png"
 	"io/ioutil"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
-func TestImage(t *testing.T) {
-	doc, err := New(filepath.Join("testdata", "test.pdf"))
+func TestNew(t *testing.T) {
+	doc, err := New(filepath.Join("testdata", "Profoto.pdf"))
 	if err != nil {
 		t.Error(err)
 	}
-
-	defer doc.Close()
-
-	tmpDir, err := ioutil.TempDir(os.TempDir(), "fitz")
-	if err != nil {
-		t.Error(err)
-	}
-
-	for n := 0; n < doc.NumPage(); n++ {
-		img, err := doc.Image(n)
-		if err != nil {
-			t.Error(err)
-		}
-
-		f, err := os.Create(filepath.Join(tmpDir, fmt.Sprintf("test%03d.jpg", n)))
-		if err != nil {
-			t.Error(err)
-		}
-
-		err = jpeg.Encode(f, img, &jpeg.Options{Quality: jpeg.DefaultQuality})
-		if err != nil {
-			t.Error(err)
-		}
-
-		f.Close()
-	}
+	fmt.Println(doc.NumObj(), doc.NumPage())
 }
 
-func TestImageFromMemory(t *testing.T) {
-	b, err := ioutil.ReadFile(filepath.Join("testdata", "test.pdf"))
+func TestNewFromMemory(t *testing.T) {
+	b, err := ioutil.ReadFile(filepath.Join("testdata", "Profoto.pdf"))
 	if err != nil {
 		t.Error(err)
 	}
@@ -52,127 +30,95 @@ func TestImageFromMemory(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
+	fmt.Println(doc.NumObj(), doc.NumPage())
+}
 
-	defer doc.Close()
-
-	tmpDir, err := ioutil.TempDir(os.TempDir(), "fitz")
+func TestNewFromReader(t *testing.T) {
+	f, err := os.Open(filepath.Join("testdata", "Profoto.pdf"))
 	if err != nil {
 		t.Error(err)
 	}
 
-	defer os.RemoveAll(tmpDir)
-
-	for n := 0; n < doc.NumPage(); n++ {
-		img, err := doc.Image(n)
-		if err != nil {
-			t.Error(err)
-		}
-
-		f, err := os.Create(filepath.Join(tmpDir, fmt.Sprintf("test%03d.jpg", n)))
-		if err != nil {
-			t.Error(err)
-		}
-
-		err = jpeg.Encode(f, img, &jpeg.Options{Quality: jpeg.DefaultQuality})
-		if err != nil {
-			t.Error(err)
-		}
-
-		f.Close()
+	doc, err := NewFromReader(f)
+	if err != nil {
+		t.Error(err)
 	}
+	fmt.Println(doc.NumObj(), doc.NumPage())
 }
 
 func TestText(t *testing.T) {
-	doc, err := New(filepath.Join("testdata", "test.pdf"))
+	doc, err := New(filepath.Join("testdata", "liusi.pdf"))
 	if err != nil {
 		t.Error(err)
 	}
 
 	defer doc.Close()
 
-	tmpDir, err := ioutil.TempDir(os.TempDir(), "fitz")
-	if err != nil {
-		t.Error(err)
-	}
+	//tmpDir, err := ioutil.TempDir(os.TempDir(), "fitz")
+	//if err != nil {
+	//	t.Error(err)
+	//}
+
+	startTime := time.Now()
+
+	var sb strings.Builder
+	random := rand.New(rand.NewSource(startTime.Unix()))
 
 	for n := 0; n < doc.NumPage(); n++ {
 		text, err := doc.Text(n)
 		if err != nil {
 			t.Error(err)
 		}
-
-		f, err := os.Create(filepath.Join(tmpDir, fmt.Sprintf("test%03d.txt", n)))
-		if err != nil {
-			t.Error(err)
+		if sb.Len() > 100000 {
+			break
+		}
+		if sb.Len() < 50000 {
+			sb.WriteString(text)
+			continue
 		}
 
-		_, err = f.WriteString(text)
-		if err != nil {
-			t.Error(err)
+		if random.Float32() > 0.5 {
+			sb.WriteString(text)
 		}
 
-		f.Close()
+		//f, err := os.Create(filepath.Join(tmpDir, fmt.Sprintf("test%03d.txt", n)))
+		//if err != nil {
+		//	t.Error(err)
+		//}
+		//
+		//_, err = f.WriteString(text)
+		//if err != nil {
+		//	t.Error(err)
+		//}
+		//
+		//f.Close()
 	}
+	fmt.Println("len:", len(sb.String()), ",use:", time.Now().Sub(startTime))
 }
 
-func TestHTML(t *testing.T) {
-	doc, err := New(filepath.Join("testdata", "test.pdf"))
+func TestImage(t *testing.T) {
+	doc, err := New(filepath.Join("testdata", "Profoto.pdf"))
 	if err != nil {
 		t.Error(err)
 	}
 
 	defer doc.Close()
 
-	tmpDir, err := ioutil.TempDir(os.TempDir(), "fitz")
-	if err != nil {
-		t.Error(err)
-	}
+	for n := 1; n < doc.NumObj(); n++ {
+		img, err := doc.Image(n)
+		if err != nil {
+			if err != ErrNotImage {
+				t.Logf("Get Image failed, err=%v", err)
+			}
+			continue
+		}
 
-	for n := 0; n < doc.NumPage(); n++ {
-		html, err := doc.HTML(n, true)
+		f, err := os.Create(filepath.Join("test", fmt.Sprintf("img-%v.png", n)))
 		if err != nil {
 			t.Error(err)
 		}
 
-		f, err := os.Create(filepath.Join(tmpDir, fmt.Sprintf("test%03d.html", n)))
-		if err != nil {
-			t.Error(err)
-		}
-
-		_, err = f.WriteString(html)
-		if err != nil {
-			t.Error(err)
-		}
-
-		f.Close()
-	}
-}
-
-func TestSVG(t *testing.T) {
-	doc, err := New(filepath.Join("testdata", "test.pdf"))
-	if err != nil {
-		t.Error(err)
-	}
-
-	defer doc.Close()
-
-	tmpDir, err := ioutil.TempDir(os.TempDir(), "fitz")
-	if err != nil {
-		t.Error(err)
-	}
-
-	for n := 0; n < doc.NumPage(); n++ {
-		svg, err := doc.SVG(n)
-		if err != nil {
-			t.Error(err)
-		}
-
-		f, err := os.Create(filepath.Join(tmpDir, fmt.Sprintf("test%03d.svg", n)))
-		if err != nil {
-			t.Error(err)
-		}
-
-		_, err = f.WriteString(svg)
+		err = png.Encode(f, img)
 		if err != nil {
 			t.Error(err)
 		}
@@ -189,10 +135,11 @@ func TestToC(t *testing.T) {
 
 	defer doc.Close()
 
-	_, err = doc.ToC()
+	outlines, err := doc.ToC()
 	if err != nil {
 		t.Error(err)
 	}
+	fmt.Println(outlines)
 }
 
 func TestMetadata(t *testing.T) {
@@ -207,4 +154,5 @@ func TestMetadata(t *testing.T) {
 	if len(meta) == 0 {
 		t.Error(fmt.Errorf("metadata is empty"))
 	}
+	fmt.Println(meta)
 }
