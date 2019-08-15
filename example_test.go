@@ -9,7 +9,7 @@ import (
 )
 
 func ExampleNew() {
-	doc, err := New("test.pdf")
+	doc, err := New("testdata/test.pdf")
 	if err != nil {
 		panic(err)
 	}
@@ -22,9 +22,11 @@ func ExampleNew() {
 	}
 
 	// Extract pages as images
-	for n := 0; n < doc.NumPage(); n++ {
+	for n := 1; n < doc.NumObj(); n++ {
 		img, err := doc.Image(n)
-		if err != nil {
+		if err == ErrNotImage {
+			continue
+		}else if err != nil {
 			panic(err)
 		}
 
@@ -61,43 +63,4 @@ func ExampleNew() {
 		f.Close()
 	}
 
-	// Extract pages as html
-	for n := 0; n < doc.NumPage(); n++ {
-		html, err := doc.HTML(n, true)
-		if err != nil {
-			panic(err)
-		}
-
-		f, err := os.Create(filepath.Join(tmpDir, fmt.Sprintf("test%03d.html", n)))
-		if err != nil {
-			panic(err)
-		}
-
-		_, err = f.WriteString(html)
-		if err != nil {
-			panic(err)
-		}
-
-		f.Close()
-	}
-
-	// Extract pages as svg
-	for n := 0; n < doc.NumPage(); n++ {
-		svg, err := doc.SVG(n)
-		if err != nil {
-			panic(err)
-		}
-
-		f, err := os.Create(filepath.Join(tmpDir, fmt.Sprintf("test%03d.svg", n)))
-		if err != nil {
-			panic(err)
-		}
-
-		_, err = f.WriteString(svg)
-		if err != nil {
-			panic(err)
-		}
-
-		f.Close()
-	}
 }
