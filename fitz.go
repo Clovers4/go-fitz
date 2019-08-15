@@ -41,9 +41,11 @@ var (
 
 // Document represents fitz document.
 type Document struct {
-	ctx *C.struct_fz_context_s
-	pdf *C.struct_pdf_document_s
-	mtx sync.Mutex //todo:delete lock to be more fast
+	ctx       *C.struct_fz_context_s
+	pdf       *C.struct_pdf_document_s
+	pageTotal int
+	objTotal  int
+	mtx       sync.Mutex //todo:delete lock to be more fast
 }
 
 // Outline type.
@@ -94,6 +96,9 @@ func New(filename string) (f *Document, err error) {
 		err = ErrNeedsPassword
 	}
 
+	f.pageTotal = int(C.pdf_count_pages(f.ctx, f.pdf))
+	f.objTotal = int(C.pdf_count_objects(f.ctx, f.pdf))
+
 	return
 }
 
@@ -129,6 +134,9 @@ func NewFromMemory(b []byte) (f *Document, err error) {
 		err = ErrNeedsPassword
 	}
 
+	f.pageTotal = int(C.pdf_count_pages(f.ctx, f.pdf))
+	f.objTotal = int(C.pdf_count_objects(f.ctx, f.pdf))
+
 	return
 }
 
@@ -145,12 +153,12 @@ func NewFromReader(r io.Reader) (f *Document, err error) {
 
 // NumPage returns total number of pages in document.
 func (f *Document) NumPage() int {
-	return int(C.pdf_count_pages(f.ctx, f.pdf))
+	return f.pageTotal
 }
 
 // NumObj returns total number of objects in document.
 func (f *Document) NumObj() int {
-	return int(C.pdf_count_objects(f.ctx, f.pdf))
+	return f.objTotal
 }
 
 // Text returns text for given page number.  Index start at 0
@@ -158,7 +166,7 @@ func (f *Document) Text(pageNumber int) (string, error) {
 	f.mtx.Lock()
 	defer f.mtx.Unlock()
 
-	if pageNumber < 0 || f.NumPage() <= pageNumber {
+	if pageNumber < 0 || f.pageTotal <= pageNumber {
 		return "", ErrPageMissing
 	}
 
@@ -196,17 +204,29 @@ func (f *Document) Text(pageNumber int) (string, error) {
 
 // Image returns image.Image encoded by png. The objNumber should between 1 ~ f.NumObj()
 func (f *Document) Image(objNumber int) (image.Image, error) {
+	b, err := f.ImageBytes(objNumber)
+	if err != nil {
+		return nil, err
+	}
+	img, _, err := image.Decode(bytes.NewBuffer(b))
+	return img, err
+}
+
+// ImageBytes returns image.Image bytes encoded by png. The objNumber should between 1 ~ f.NumObj()
+// ImageBytes will be faster than Image
+func (f *Document) ImageBytes(objNumber int) ([]byte, error) {
 	f.mtx.Lock()
 	defer f.mtx.Unlock()
 
-	if objNumber <= 0 || f.NumObj() <= objNumber {
+	if objNumber <= 0 || f.objTotal <= objNumber {
 		return nil, ErrObjMissing
 	}
 
-	obj := C.pdf_load_object(f.ctx, f.pdf, C.int(objNumber));
+	obj := C.pdf_load_object(f.ctx, f.pdf, C.int(objNumber))
 	if f.isImage(obj) {
-		return f.saveImage(objNumber)
+		return f.saveImage(objNumber), nil
 	}
+
 	return nil, ErrNotImage
 }
 
@@ -215,7 +235,7 @@ func (f *Document) isImage(obj *C.pdf_obj) bool {
 	return C.int(1) == C.pdf_name_eq(f.ctx, objType, C.PDF_NAME_Image)
 }
 
-func (f *Document) saveImage(objNumber int) (image.Image, error) {
+func (f *Document) saveImage(objNumber int) []byte {
 	ref := C.pdf_new_indirect(f.ctx, f.pdf, C.int(objNumber), C.int(0))
 	defer C.pdf_drop_obj(f.ctx, ref)
 
@@ -227,8 +247,8 @@ func (f *Document) saveImage(objNumber int) (image.Image, error) {
 
 	size := C.fz_buffer_storage(f.ctx, buf, nil)
 	str := C.GoStringN(C.fz_string_from_buffer(f.ctx, buf), C.int(size))
-	img, _, err := image.Decode(bytes.NewBuffer([]byte(str)))
-	return img, err
+
+	return []byte(str)
 }
 
 // ToC returns the table of contents (also known as outline).
@@ -296,7 +316,6 @@ func (f *Document) Metadata() map[string]string {
 // Close closes the underlying fitz document.
 func (f *Document) Close() error {
 	C.pdf_drop_document(f.ctx, f.pdf)
-	C.fz_flush_warnings(f.ctx)
 	C.fz_drop_context(f.ctx)
 	return nil
 }
